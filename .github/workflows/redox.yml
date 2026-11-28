@@ -63,6 +63,8 @@ jobs:
     container:
       image: redoxos/redoxer:latest
       options: --device /dev/kvm
+    env:
+      REDOXER_QEMU_ARGS: "-smp 1 -display gtk"
 
     steps:
       - name: Check out repository
@@ -71,7 +73,7 @@ jobs:
       - name: Install capture tools
         run: |
           apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends xvfb ffmpeg x11-utils
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends xvfb ffmpeg x11-utils qemu-system-gui
           rm -rf /var/lib/apt/lists/*
 
       - name: Prepare Redoxer cache
@@ -79,6 +81,13 @@ jobs:
           mkdir -p artifacts
           ln -sfn /root/.redoxer "$HOME/.redoxer"
           redoxer --version | tee artifacts/redoxer-version.txt
+          qemu-system-x86_64 --version | head -n 1 | tee artifacts/qemu-version.txt
+          qemu-system-x86_64 -display help > artifacts/qemu-display-backends.txt 2>&1 || true
+          if ! grep -Eqi 'gtk' artifacts/qemu-display-backends.txt; then
+            echo "QEMU GTK display backend is unavailable" >&2
+            cat artifacts/qemu-display-backends.txt >&2
+            exit 1
+          fi
 
       - name: Boot Orbital and record the display
         shell: bash
