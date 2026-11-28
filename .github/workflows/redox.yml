@@ -1,0 +1,146 @@
+name: Redox CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  TARGET: x86_64-unknown-redox
+  REDOXER_QEMU_ARGS: "-smp 1"
+
+jobs:
+  headless:
+    name: Redox headless runtime
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    container:
+      image: redoxos/redoxer:latest
+      options: --device /dev/kvm
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Prepare Redoxer cache
+        run: |
+          mkdir -p artifacts
+          ln -sfn /root/.redoxer "$HOME/.redoxer"
+          redoxer --version | tee artifacts/redoxer-version.txt
+          qemu-system-x86_64 --version | head -n 1 | tee artifacts/qemu-version.txt
+
+      - name: Verify Redox VM boot
+        run: |
+          set -o pipefail
+          timeout --signal=TERM --kill-after=10s 180s redoxer exec true 2>&1 | tee artifacts/redox-boot.log
+
+      - name: Build POSIX runtime probe
+        run: |
+          set -o pipefail
+          redoxer cc tests/redox-smoke.c -o redox-smoke 2>&1 | tee artifacts/redox-smoke-build.log
+
+      - name: Run POSIX runtime probe in Redox
+        run: |
+          set -o pipefail
+          timeout --signal=TERM --kill-after=10s 180s redoxer exec ./redox-smoke 2>&1 | tee artifacts/redox-smoke-run.log
+
+      - name: Upload headless diagnostics
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: redox-headless-${{ github.run_id }}
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 14
+
+  gui:
+    name: Redox Orbital GUI capture
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    container:
+      image: redoxos/redoxer:latest
+      options: --device /dev/kvm
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install capture tools
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends xvfb ffmpeg x11-utils
+          rm -rf /var/lib/apt/lists/*
+
+      - name: Prepare Redoxer cache
+        run: |
+          mkdir -p artifacts
+          ln -sfn /root/.redoxer "$HOME/.redoxer"
+          redoxer --version | tee artifacts/redoxer-version.txt
+
+      - name: Boot Orbital and record the display
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          export DISPLAY=:99
+          Xvfb "$DISPLAY" -screen 0 1280x800x24 -nolisten tcp > artifacts/xvfb.log 2>&1 &
+          xvfb_pid=$!
+
+          recorder_pid=""
+          cleanup() {
+            if [[ -n "$recorder_pid" ]]; then
+              kill -INT "$recorder_pid" 2>/dev/null || true
+              wait "$recorder_pid" 2>/dev/null || true
+            fi
+            kill "$xvfb_pid" 2>/dev/null || true
+            wait "$xvfb_pid" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          for attempt in $(seq 1 30); do
+            if xdpyinfo -display "$DISPLAY" >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+          xdpyinfo -display "$DISPLAY" >/dev/null
+
+          ffmpeg -y -loglevel warning \
+            -f x11grab -framerate 12 -video_size 1280x800 -i "$DISPLAY" \
+            -c:v libx264 -preset ultrafast -pix_fmt yuv420p \
+            -t 75 artifacts/redox-orbital.mp4 > artifacts/ffmpeg.log 2>&1 &
+          recorder_pid=$!
+          sleep 2
+
+          set +e
+          timeout --signal=TERM --kill-after=10s 65s redoxer exec --gui sleep 45 2>&1 | tee artifacts/redox-gui.log
+          redox_status=${PIPESTATUS[0]}
+          set -e
+
+          kill -INT "$recorder_pid" 2>/dev/null || true
+          wait "$recorder_pid" 2>/dev/null || true
+          recorder_pid=""
+
+          if [[ -s artifacts/redox-orbital.mp4 ]]; then
+            ffmpeg -y -loglevel error -sseof -1 -i artifacts/redox-orbital.mp4 \
+              -frames:v 1 artifacts/redox-orbital.png
+          fi
+
+          if [[ ! -s artifacts/redox-orbital.mp4 ]]; then
+            echo "GUI recording was not created" >&2
+            exit 1
+          fi
+
+          exit "$redox_status"
+
+      - name: Upload GUI recording and diagnostics
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: redox-orbital-gui-${{ github.run_id }}
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 14
