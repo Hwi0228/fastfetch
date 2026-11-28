@@ -71,7 +71,7 @@ jobs:
       image: redoxos/redoxer:latest
       options: --device /dev/kvm
     env:
-      REDOXER_QEMU_ARGS: "-smp 1 -machine pc -cpu host -audiodev none,id=audio0 -device AC97,audiodev=audio0 -device e1000,netdev=net0 -display gtk -monitor unix:/tmp/redox-qemu-monitor.sock,server,nowait"
+      REDOXER_QEMU_ARGS: "-smp 1 -machine pc -cpu host -device e1000,netdev=net0 -display gtk -monitor unix:/tmp/redox-qemu-monitor.sock,server,nowait"
 
     steps:
       - name: Check out repository
@@ -166,6 +166,15 @@ jobs:
               response = client.recv(4096)
               print(response.decode("utf-8", "replace"), flush=True)
               print("Sent Enter through QEMU HMP monitor", flush=True)
+
+              # Redoxer's GUI init service starts Orbital on virtual terminal 3.
+              # Switch the visible QEMU console from the default VT to VT 3.
+              time.sleep(20)
+              client.sendall(b"sendkey ctrl-alt-f3\n")
+              time.sleep(1)
+              response = client.recv(4096)
+              print(response.decode("utf-8", "replace"), flush=True)
+              print("Switched guest display to VT 3", flush=True)
           finally:
               client.close()
           PY
