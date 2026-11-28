@@ -33,16 +33,19 @@ jobs:
           qemu-system-x86_64 --version | head -n 1 | tee artifacts/qemu-version.txt
 
       - name: Verify Redox VM boot
+        shell: bash
         run: |
           set -o pipefail
           timeout --signal=TERM --kill-after=10s 180s redoxer exec true 2>&1 | tee artifacts/redox-boot.log
 
       - name: Build POSIX runtime probe
+        shell: bash
         run: |
           set -o pipefail
           redoxer cc tests/redox-smoke.c -o redox-smoke 2>&1 | tee artifacts/redox-smoke-build.log
 
       - name: Run POSIX runtime probe in Redox
+        shell: bash
         run: |
           set -o pipefail
           timeout --signal=TERM --kill-after=10s 180s redoxer exec ./redox-smoke 2>&1 | tee artifacts/redox-smoke-run.log
@@ -78,7 +81,7 @@ jobs:
       - name: Install capture tools
         run: |
           apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends xvfb ffmpeg x11-utils qemu-system-gui
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends xvfb ffmpeg x11-utils xdotool qemu-system-gui
           rm -rf /var/lib/apt/lists/*
 
       - name: Prepare Redoxer cache
@@ -130,8 +133,14 @@ jobs:
           sleep 2
 
           set +e
-          timeout --signal=TERM --kill-after=10s 65s redoxer exec --gui sleep 45 2>&1 | tee artifacts/redox-gui.log
-          redox_status=${PIPESTATUS[0]}
+          timeout --signal=TERM --kill-after=10s 65s redoxer exec --gui sleep 45 > artifacts/redox-gui.log 2>&1 &
+          redox_pid=$!
+          # Redox's bootloader initially waits at the display-resolution menu.
+          # The selected 1280x800 mode is already highlighted in the default image.
+          sleep 15
+          xdotool key --clearmodifiers Return
+          wait "$redox_pid"
+          redox_status=$?
           set -e
 
           kill -INT "$recorder_pid" 2>/dev/null || true
