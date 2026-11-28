@@ -71,7 +71,7 @@ jobs:
       image: redoxos/redoxer:latest
       options: --device /dev/kvm
     env:
-      REDOXER_QEMU_ARGS: "-smp 1 -display gtk"
+      REDOXER_QEMU_ARGS: "-smp 1 -display gtk -monitor unix:/tmp/redox-qemu-monitor.sock,server,nowait"
 
     steps:
       - name: Check out repository
@@ -80,7 +80,7 @@ jobs:
       - name: Install capture tools
         run: |
           apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends xvfb ffmpeg x11-utils xdotool qemu-system-gui
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends xvfb ffmpeg x11-utils qemu-system-gui
           rm -rf /var/lib/apt/lists/*
 
       - name: Prepare Redoxer cache
@@ -131,40 +131,51 @@ jobs:
           recorder_pid=$!
           sleep 2
 
+          rm -f /tmp/redox-qemu-monitor.sock
           set +e
           timeout --signal=TERM --kill-after=15s 180s redoxer exec --gui sleep 30 > artifacts/redox-gui.log 2>&1 &
           redox_pid=$!
-          # Wait until the VM is running and its bootloader resolution menu
-          # has had time to appear. Then focus the actual QEMU window and press
-          # Return (the default highlighted mode is 1280x800).
-          qemu_window=""
-          for attempt in $(seq 1 90); do
-            qemu_window="$(xdotool search --onlyvisible --class 'qemu' 2>/dev/null | head -n 1 || true)"
-            if [[ -n "$qemu_window" ]]; then
-              break
-            fi
-            if ! kill -0 "$redox_pid" 2>/dev/null; then
-              echo "redoxer exited before the QEMU window appeared" >&2
-              break
-            fi
-            sleep 1
-          done
-          if [[ -n "$qemu_window" ]]; then
-            xdotool getwindowname "$qemu_window" | tee artifacts/qemu-window-title.txt
-            xdotool getwindowgeometry --shell "$qemu_window" > artifacts/qemu-window-geometry.txt
-            sleep 15
-            xdotool windowmap --sync "$qemu_window"
-            xdotool windowactivate --sync "$qemu_window"
-            xdotool windowfocus --sync "$qemu_window"
-            sleep 1
-            xdotool keydown Return
-            sleep 0.3
-            xdotool keyup Return
-            sleep 2
-          else
-            echo "Could not find the visible QEMU window to accept the boot menu" >&2
-            xdotool search --onlyvisible --name '' > artifacts/visible-x11-windows.txt 2>&1 || true
+
+          # Control the guest keyboard through QEMU's local HMP monitor.
+          # This avoids X11 window-manager focus and input-routing limitations.
+          python3 - <<'PY' > artifacts/qemu-monitor-input.log 2>&1
+          import socket
+          import time
+
+          monitor = "/tmp/redox-qemu-monitor.sock"
+          deadline = time.monotonic() + 90
+          client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+          client.settimeout(5)
+
+          while True:
+              try:
+                  client.connect(monitor)
+                  break
+              except (FileNotFoundError, ConnectionRefusedError):
+                  if time.monotonic() >= deadline:
+                      raise SystemExit("QEMU monitor socket did not become available")
+                  time.sleep(1)
+
+          try:
+              greeting = client.recv(4096)
+              print(greeting.decode("utf-8", "replace"), flush=True)
+              # Allow the Redox bootloader's resolution selector to settle.
+              time.sleep(15)
+              client.sendall(b"sendkey ret\\n")
+              time.sleep(1)
+              response = client.recv(4096)
+              print(response.decode("utf-8", "replace"), flush=True)
+              print("Sent Enter through QEMU HMP monitor", flush=True)
+          finally:
+              client.close()
+          PY
+          monitor_status=$?
+
+          if [[ "$monitor_status" -ne 0 ]]; then
+            echo "Failed to send Enter through the QEMU monitor" >&2
+            kill "$redox_pid" 2>/dev/null || true
           fi
+
           wait "$redox_pid"
           redox_status=$?
           set -e
