@@ -134,11 +134,12 @@ jobs:
           set +e
           timeout --signal=TERM --kill-after=15s 180s redoxer exec --gui sleep 30 > artifacts/redox-gui.log 2>&1 &
           redox_pid=$!
-          # Wait for QEMU's GTK window, focus it, then accept the highlighted
-          # 1280x800 mode in Redox's bootloader resolution selector.
+          # Wait until the VM is running and its bootloader resolution menu
+          # has had time to appear. Then focus the actual QEMU window and press
+          # Return (the default highlighted mode is 1280x800).
           qemu_window=""
           for attempt in $(seq 1 90); do
-            qemu_window="$(xdotool search --onlyvisible --name 'QEMU' 2>/dev/null | head -n 1 || true)"
+            qemu_window="$(xdotool search --onlyvisible --class 'qemu' 2>/dev/null | head -n 1 || true)"
             if [[ -n "$qemu_window" ]]; then
               break
             fi
@@ -149,11 +150,20 @@ jobs:
             sleep 1
           done
           if [[ -n "$qemu_window" ]]; then
+            xdotool getwindowname "$qemu_window" | tee artifacts/qemu-window-title.txt
+            xdotool getwindowgeometry --shell "$qemu_window" > artifacts/qemu-window-geometry.txt
+            sleep 15
+            xdotool windowmap --sync "$qemu_window"
             xdotool windowactivate --sync "$qemu_window"
+            xdotool windowfocus --sync "$qemu_window"
+            sleep 1
+            xdotool keydown Return
+            sleep 0.3
+            xdotool keyup Return
             sleep 2
-            xdotool key --window "$qemu_window" --clearmodifiers Return
           else
             echo "Could not find the visible QEMU window to accept the boot menu" >&2
+            xdotool search --onlyvisible --name '' > artifacts/visible-x11-windows.txt 2>&1 || true
           fi
           wait "$redox_pid"
           redox_status=$?
