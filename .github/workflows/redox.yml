@@ -80,7 +80,7 @@ jobs:
       - name: Install capture tools
         run: |
           apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends xvfb ffmpeg x11-utils qemu-system-gui
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends xvfb ffmpeg x11-utils qemu-system-gui python3
           rm -rf /var/lib/apt/lists/*
 
       - name: Prepare Redoxer cache
@@ -161,7 +161,7 @@ jobs:
               print(greeting.decode("utf-8", "replace"), flush=True)
               # Allow the Redox bootloader's resolution selector to settle.
               time.sleep(15)
-              client.sendall(b"sendkey ret\\n")
+              client.sendall(b"sendkey ret\n")
               time.sleep(1)
               response = client.recv(4096)
               print(response.decode("utf-8", "replace"), flush=True)
