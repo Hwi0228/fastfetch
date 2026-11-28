@@ -71,7 +71,7 @@ jobs:
       image: redoxos/redoxer:latest
       options: --device /dev/kvm
     env:
-      REDOXER_QEMU_ARGS: "-smp 1 -machine pc -cpu host -device e1000,netdev=net0 -display gtk -monitor unix:/tmp/redox-qemu-monitor.sock,server,nowait"
+      REDOXER_QEMU_ARGS: "-smp 1 -cpu host -display gtk -vga std -monitor unix:/tmp/redox-qemu-monitor.sock,server,nowait"
 
     steps:
       - name: Check out repository
@@ -127,13 +127,13 @@ jobs:
           ffmpeg -y -loglevel warning \
             -f x11grab -framerate 12 -video_size 1280x800 -i "$DISPLAY" \
             -c:v libx264 -preset ultrafast -pix_fmt yuv420p \
-            -t 180 artifacts/redox-orbital.mp4 > artifacts/ffmpeg.log 2>&1 &
+            -t 270 artifacts/redox-orbital.mp4 > artifacts/ffmpeg.log 2>&1 &
           recorder_pid=$!
           sleep 2
 
           rm -f /tmp/redox-qemu-monitor.sock
           set +e
-          timeout --signal=TERM --kill-after=15s 180s redoxer exec --gui sleep 60 > artifacts/redox-gui.log 2>&1 &
+          timeout --signal=TERM --kill-after=15s 240s redoxer exec --gui -o artifacts/redox-debugcon.log -- sleep 90 > artifacts/redox-gui.log 2>&1 &
           redox_pid=$!
 
           # Control the guest keyboard through QEMU's local HMP monitor.
@@ -141,8 +141,10 @@ jobs:
           python3 - <<'PY' > artifacts/qemu-monitor-input.log 2>&1
           import socket
           import time
+          from pathlib import Path
 
           monitor = "/tmp/redox-qemu-monitor.sock"
+          boot_log = Path("artifacts/redox-gui.log")
           deadline = time.monotonic() + 90
           client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
           client.settimeout(5)
@@ -167,14 +169,26 @@ jobs:
               print(response.decode("utf-8", "replace"), flush=True)
               print("Sent Enter through QEMU HMP monitor", flush=True)
 
-              # Redoxer's GUI init service starts Orbital on virtual terminal 3.
-              # Switch the visible QEMU console from the default VT to VT 3.
-              time.sleep(20)
-              client.sendall(b"sendkey ctrl-alt-f3\n")
+              # Wait until Redoxer's GUI init script reaches its Orbital command.
+              # Redox's documented shortcut for returning to Orbital is F3 alone.
+              marker = "## running redoxer in orbital ##"
+              gui_deadline = time.monotonic() + 120
+              while time.monotonic() < gui_deadline:
+                  try:
+                      if marker in boot_log.read_text(errors="replace"):
+                          break
+                  except FileNotFoundError:
+                      pass
+                  time.sleep(1)
+              else:
+                  raise SystemExit("Redox GUI init did not reach the Orbital launch command")
+
+              time.sleep(5)
+              client.sendall(b"sendkey f3\n")
               time.sleep(1)
               response = client.recv(4096)
               print(response.decode("utf-8", "replace"), flush=True)
-              print("Switched guest display to VT 3", flush=True)
+              print("Sent Redox Orbital VT shortcut (F3)", flush=True)
           finally:
               client.close()
           PY
