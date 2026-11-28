@@ -71,7 +71,7 @@ jobs:
       image: redoxos/redoxer:latest
       options: --device /dev/kvm
     env:
-      REDOXER_QEMU_ARGS: "-smp 1 -display gtk -monitor unix:/tmp/redox-qemu-monitor.sock,server,nowait"
+      REDOXER_QEMU_ARGS: "-smp 1 -cpu max -display gtk -monitor unix:/tmp/redox-qemu-monitor.sock,server,nowait"
 
     steps:
       - name: Check out repository
@@ -133,7 +133,7 @@ jobs:
 
           rm -f /tmp/redox-qemu-monitor.sock
           set +e
-          timeout --signal=TERM --kill-after=15s 180s redoxer exec --gui sleep 30 > artifacts/redox-gui.log 2>&1 &
+          timeout --signal=TERM --kill-after=15s 180s redoxer exec --gui sleep 60 > artifacts/redox-gui.log 2>&1 &
           redox_pid=$!
 
           # Control the guest keyboard through QEMU's local HMP monitor.
@@ -185,7 +185,7 @@ jobs:
           recorder_pid=""
 
           if [[ -s artifacts/redox-orbital.mp4 ]]; then
-            ffmpeg -y -loglevel error -sseof -1 -i artifacts/redox-orbital.mp4 \
+            ffmpeg -y -loglevel error -sseof -15 -i artifacts/redox-orbital.mp4 \
               -frames:v 1 artifacts/redox-orbital.png
           fi
 
