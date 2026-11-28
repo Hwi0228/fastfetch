@@ -71,7 +71,7 @@ jobs:
       image: redoxos/redoxer:latest
       options: --device /dev/kvm
     env:
-      REDOXER_QEMU_ARGS: "-smp 1 -cpu max -display gtk -monitor unix:/tmp/redox-qemu-monitor.sock,server,nowait"
+      REDOXER_QEMU_ARGS: "-smp 1 -cpu max -audiodev none,id=audio0 -device intel-hda -device hda-duplex,audiodev=audio0 -display gtk -monitor unix:/tmp/redox-qemu-monitor.sock,server,nowait"
 
     steps:
       - name: Check out repository
