@@ -1,0 +1,229 @@
+name: Redox CI
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  TARGET: x86_64-unknown-redox
+  REDOXER_QEMU_ARGS: "-smp 1"
+
+jobs:
+  headless:
+    name: Redox headless runtime
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    container:
+      image: redoxos/redoxer:latest
+      options: --device /dev/kvm
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Prepare Redoxer cache
+        run: |
+          mkdir -p artifacts
+          ln -sfn /root/.redoxer "$HOME/.redoxer"
+          redoxer --version | tee artifacts/redoxer-version.txt
+          qemu-system-x86_64 --version | head -n 1 | tee artifacts/qemu-version.txt
+
+      - name: Verify Redox VM boot
+        shell: bash
+        run: |
+          set -o pipefail
+          timeout --signal=TERM --kill-after=10s 180s redoxer exec true 2>&1 | tee artifacts/redox-boot.log
+
+      - name: Build POSIX runtime probe
+        shell: bash
+        run: |
+          set -o pipefail
+          redoxer cc tests/redox-smoke.c -o redox-smoke 2>&1 | tee artifacts/redox-smoke-build.log
+
+      - name: Run POSIX runtime probe in Redox
+        shell: bash
+        run: |
+          set -o pipefail
+          timeout --signal=TERM --kill-after=10s 180s redoxer exec ./redox-smoke 2>&1 | tee artifacts/redox-smoke-run.log
+
+      - name: Assert POSIX runtime probe output
+        run: |
+          grep -Fq "PASS: Redox POSIX runtime probe" artifacts/redox-smoke-run.log
+          grep -Fq "sysname=Redox" artifacts/redox-smoke-run.log
+
+      - name: Upload headless diagnostics
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: redox-headless-${{ github.run_id }}
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 14
+
+  gui:
+    name: Redox Orbital GUI capture
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    container:
+      image: redoxos/redoxer:latest
+      options: --device /dev/kvm
+    env:
+      REDOXER_QEMU_ARGS: "-smp 1 -cpu host -display gtk -vga std -monitor unix:/tmp/redox-qemu-monitor.sock,server,nowait"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install capture tools
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends xvfb ffmpeg x11-utils qemu-system-gui python3
+          rm -rf /var/lib/apt/lists/*
+
+      - name: Prepare Redoxer cache
+        run: |
+          mkdir -p artifacts
+          ln -sfn /root/.redoxer "$HOME/.redoxer"
+          redoxer --version | tee artifacts/redoxer-version.txt
+          qemu-system-x86_64 --version | head -n 1 | tee artifacts/qemu-version.txt
+          qemu-system-x86_64 -display help > artifacts/qemu-display-backends.txt 2>&1 || true
+          if ! grep -Eqi 'gtk' artifacts/qemu-display-backends.txt; then
+            echo "QEMU GTK display backend is unavailable" >&2
+            cat artifacts/qemu-display-backends.txt >&2
+            exit 1
+          fi
+
+      - name: Boot Orbital and record the display
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          export DISPLAY=:99
+          Xvfb "$DISPLAY" -screen 0 1280x800x24 -nolisten tcp > artifacts/xvfb.log 2>&1 &
+          xvfb_pid=$!
+
+          recorder_pid=""
+          cleanup() {
+            if [[ -n "$recorder_pid" ]]; then
+              kill -INT "$recorder_pid" 2>/dev/null || true
+              wait "$recorder_pid" 2>/dev/null || true
+            fi
+            kill "$xvfb_pid" 2>/dev/null || true
+            wait "$xvfb_pid" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          for attempt in $(seq 1 30); do
+            if xdpyinfo -display "$DISPLAY" >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+          xdpyinfo -display "$DISPLAY" >/dev/null
+
+          ffmpeg -y -loglevel warning \
+            -f x11grab -framerate 12 -video_size 1280x800 -i "$DISPLAY" \
+            -c:v libx264 -preset ultrafast -pix_fmt yuv420p \
+            -t 270 artifacts/redox-orbital.mp4 > artifacts/ffmpeg.log 2>&1 &
+          recorder_pid=$!
+          sleep 2
+
+          rm -f /tmp/redox-qemu-monitor.sock
+          set +e
+          timeout --signal=TERM --kill-after=15s 240s redoxer exec --gui -o artifacts/redox-debugcon.log -- sleep 90 > artifacts/redox-gui.log 2>&1 &
+          redox_pid=$!
+
+          # Control the guest keyboard through QEMU's local HMP monitor.
+          # This avoids X11 window-manager focus and input-routing limitations.
+          python3 - <<'PY' > artifacts/qemu-monitor-input.log 2>&1
+          import socket
+          import time
+          from pathlib import Path
+
+          monitor = "/tmp/redox-qemu-monitor.sock"
+          boot_log = Path("artifacts/redox-gui.log")
+          deadline = time.monotonic() + 90
+          client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+          client.settimeout(5)
+
+          while True:
+              try:
+                  client.connect(monitor)
+                  break
+              except (FileNotFoundError, ConnectionRefusedError):
+                  if time.monotonic() >= deadline:
+                      raise SystemExit("QEMU monitor socket did not become available")
+                  time.sleep(1)
+
+          try:
+              greeting = client.recv(4096)
+              print(greeting.decode("utf-8", "replace"), flush=True)
+              # Allow the Redox bootloader's resolution selector to settle.
+              time.sleep(15)
+              client.sendall(b"sendkey ret\n")
+              time.sleep(1)
+              response = client.recv(4096)
+              print(response.decode("utf-8", "replace"), flush=True)
+              print("Sent Enter through QEMU HMP monitor", flush=True)
+
+              # Wait until Redoxer's GUI init script reaches its Orbital command.
+              # Redox's documented shortcut for returning to Orbital is F3 alone.
+              marker = "## running redoxer in orbital ##"
+              gui_deadline = time.monotonic() + 120
+              while time.monotonic() < gui_deadline:
+                  try:
+                      if marker in boot_log.read_text(errors="replace"):
+                          break
+                  except FileNotFoundError:
+                      pass
+                  time.sleep(1)
+              else:
+                  raise SystemExit("Redox GUI init did not reach the Orbital launch command")
+
+              time.sleep(5)
+              client.sendall(b"sendkey f3\n")
+              time.sleep(1)
+              response = client.recv(4096)
+              print(response.decode("utf-8", "replace"), flush=True)
+              print("Sent Redox Orbital VT shortcut (F3)", flush=True)
+          finally:
+              client.close()
+          PY
+          monitor_status=$?
+
+          if [[ "$monitor_status" -ne 0 ]]; then
+            echo "Failed to send Enter through the QEMU monitor" >&2
+            kill "$redox_pid" 2>/dev/null || true
+          fi
+
+          wait "$redox_pid"
+          redox_status=$?
+          set -e
+
+          kill -INT "$recorder_pid" 2>/dev/null || true
+          wait "$recorder_pid" 2>/dev/null || true
+          recorder_pid=""
+
+          if [[ -s artifacts/redox-orbital.mp4 ]]; then
+            ffmpeg -y -loglevel error -sseof -15 -i artifacts/redox-orbital.mp4 \
+              -frames:v 1 artifacts/redox-orbital.png
+          fi
+
+          if [[ ! -s artifacts/redox-orbital.mp4 ]]; then
+            echo "GUI recording was not created" >&2
+            exit 1
+          fi
+
+          exit "$redox_status"
+
+      - name: Upload GUI recording and diagnostics
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: redox-orbital-gui-${{ github.run_id }}
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 14
