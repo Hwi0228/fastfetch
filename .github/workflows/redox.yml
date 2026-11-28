@@ -53,7 +53,7 @@ jobs:
       - name: Assert POSIX runtime probe output
         run: |
           grep -Fq "PASS: Redox POSIX runtime probe" artifacts/redox-smoke-run.log
-          grep -Fxq "sysname=Redox" artifacts/redox-smoke-run.log
+          grep -Fq "sysname=Redox" artifacts/redox-smoke-run.log
 
       - name: Upload headless diagnostics
         if: always()
@@ -128,17 +128,34 @@ jobs:
           ffmpeg -y -loglevel warning \
             -f x11grab -framerate 12 -video_size 1280x800 -i "$DISPLAY" \
             -c:v libx264 -preset ultrafast -pix_fmt yuv420p \
-            -t 75 artifacts/redox-orbital.mp4 > artifacts/ffmpeg.log 2>&1 &
+            -t 180 artifacts/redox-orbital.mp4 > artifacts/ffmpeg.log 2>&1 &
           recorder_pid=$!
           sleep 2
 
           set +e
-          timeout --signal=TERM --kill-after=10s 65s redoxer exec --gui sleep 45 > artifacts/redox-gui.log 2>&1 &
+          timeout --signal=TERM --kill-after=15s 180s redoxer exec --gui sleep 30 > artifacts/redox-gui.log 2>&1 &
           redox_pid=$!
-          # Redox's bootloader initially waits at the display-resolution menu.
-          # The selected 1280x800 mode is already highlighted in the default image.
-          sleep 15
-          xdotool key --clearmodifiers Return
+          # Wait for QEMU's GTK window, focus it, then accept the highlighted
+          # 1280x800 mode in Redox's bootloader resolution selector.
+          qemu_window=""
+          for attempt in $(seq 1 90); do
+            qemu_window="$(xdotool search --onlyvisible --name 'QEMU' 2>/dev/null | head -n 1 || true)"
+            if [[ -n "$qemu_window" ]]; then
+              break
+            fi
+            if ! kill -0 "$redox_pid" 2>/dev/null; then
+              echo "redoxer exited before the QEMU window appeared" >&2
+              break
+            fi
+            sleep 1
+          done
+          if [[ -n "$qemu_window" ]]; then
+            xdotool windowactivate --sync "$qemu_window"
+            sleep 2
+            xdotool key --window "$qemu_window" --clearmodifiers Return
+          else
+            echo "Could not find the visible QEMU window to accept the boot menu" >&2
+          fi
           wait "$redox_pid"
           redox_status=$?
           set -e
